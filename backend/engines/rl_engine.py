@@ -27,9 +27,7 @@ SLOT_QTY    = 50
 
 MODEL_PATH = os.path.join(
     os.path.dirname(__file__),
-    "..", "..", "..",
-    "dynamic-production-planning-SQM-hybrid",
-    "src", "saved_models", "sqm_hybrid_best.pt"
+    "..", "saved_models", "sqm_hybrid_best.pt"
 )
 
 # ── DEFAULT LINE_VALID_MODELS (학습에 사용된 기본값) ────────────────────────

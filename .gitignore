@@ -11,10 +11,9 @@ build/
 venv/
 env/
 
-# PyTorch 모델 (용량 크므로 제외)
-backend/engines/saved_models/
-*.pt
+# PyTorch 모델 (backend/saved_models는 포함)
 *.pth
+# backend/saved_models/sqm_hybrid_best.pt 는 포함
 
 # 로그
 *.log

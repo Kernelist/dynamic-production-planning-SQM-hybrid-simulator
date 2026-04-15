@@ -1,0 +1,766 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>SQM Hybrid 생산 계획 시뮬레이터</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+  body { font-family: 'Segoe UI', sans-serif; }
+  .gantt-scroll { overflow-x: auto; }
+  .gantt-cell {
+    min-width: 26px; height: 26px;
+    border: 1px solid #d1d5db;
+    display: inline-flex; align-items: center; justify-content: center;
+    font-size: 9px; cursor: pointer; position: relative;
+    flex-shrink: 0;
+  }
+  .gantt-cell.due-violation { border: 2px solid #ef4444 !important; }
+  .gantt-row { display: flex; }
+  .gantt-label {
+    min-width: 44px; width: 44px; height: 26px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 11px; font-weight: 600; color: #374151;
+    border-right: 2px solid #9ca3af; flex-shrink: 0;
+  }
+  .tooltip {
+    display: none; position: absolute; z-index: 100;
+    background: #1f2937; color: #f9fafb;
+    padding: 6px 10px; border-radius: 6px;
+    font-size: 11px; white-space: nowrap;
+    bottom: 110%; left: 50%; transform: translateX(-50%);
+    pointer-events: none;
+  }
+  .gantt-cell:hover .tooltip { display: block; }
+  .metric-card { transition: transform 0.15s; }
+  .metric-card:hover { transform: translateY(-2px); }
+  .spinner {
+    border: 3px solid #e5e7eb;
+    border-top: 3px solid #3b82f6;
+    border-radius: 50%; width: 28px; height: 28px;
+    animation: spin 0.8s linear infinite; display: inline-block;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .collapsible-content { display: none; }
+  .collapsible-content.open { display: block; }
+  input[type=range] { accent-color: #3b82f6; }
+  .order-table-wrap { max-height: 320px; overflow-y: auto; }
+  .best-value { background: #fef9c3; border-radius: 4px; padding: 0 4px; }
+  .rank-badge {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 20px; height: 20px; border-radius: 50%;
+    font-size: 10px; font-weight: 700;
+  }
+  .improvement-bar { height: 6px; border-radius: 3px; transition: width 0.6s ease; }
+</style>
+</head>
+<body class="bg-gray-100 min-h-screen">
+
+<!-- 헤더 -->
+<header class="bg-gradient-to-r from-blue-700 to-blue-500 text-white px-6 py-4 flex items-center gap-4 shadow-lg">
+  <div>
+    <h1 class="text-xl font-bold tracking-tight">SQM Hybrid 생산 계획 시뮬레이터</h1>
+    <p class="text-blue-100 text-sm mt-0.5">SQM 휴리스틱 vs RL 에이전트 (Dueling DQN + 방법1·2) — EDD / SPT / Greedy 비교 포함</p>
+  </div>
+  <button id="runBtn" onclick="runSimulation()"
+    class="ml-auto bg-white text-blue-700 font-bold px-6 py-2.5 rounded-lg shadow hover:bg-blue-50 transition flex items-center gap-2">
+    <span id="runBtnIcon">▶</span>
+    <span id="runBtnText">시뮬레이션 실행</span>
+  </button>
+</header>
+
+<div class="flex gap-4 p-4" style="min-height: calc(100vh - 72px);">
+
+  <!-- ── 왼쪽: 설정 패널 -->
+  <div class="w-[32%] flex flex-col gap-4">
+
+    <!-- 오더 설정 -->
+    <div class="bg-white rounded-xl shadow p-4">
+      <div class="flex items-center justify-between mb-3">
+        <h2 class="font-bold text-gray-800">📋 고객 오더</h2>
+        <button onclick="addOrderRow()"
+          class="bg-blue-500 hover:bg-blue-600 text-white text-sm px-3 py-1.5 rounded-lg transition">
+          + 오더 추가
+        </button>
+      </div>
+      <div class="order-table-wrap">
+        <table class="w-full text-xs border-collapse" id="orderTable">
+          <thead class="sticky top-0 bg-gray-100 z-10">
+            <tr class="text-gray-600">
+              <th class="p-1 border text-center w-6">No</th>
+              <th class="p-1 border text-center">모델</th>
+              <th class="p-1 border text-center">수량</th>
+              <th class="p-1 border text-center">납기</th>
+              <th class="p-1 border text-center">Mold</th>
+              <th class="p-1 border text-center">Color</th>
+              <th class="p-1 border text-center w-6">-</th>
+            </tr>
+          </thead>
+          <tbody id="orderBody"></tbody>
+        </table>
+      </div>
+      <div id="emptyOrderMsg" class="text-center text-gray-400 py-4 text-sm hidden">
+        오더를 추가하세요
+      </div>
+    </div>
+
+    <!-- 라인/슬롯 설정 -->
+    <div class="bg-white rounded-xl shadow p-4">
+      <h2 class="font-bold text-gray-800 mb-3">⚙️ 라인 / 슬롯 설정</h2>
+      <div class="space-y-3">
+        <div class="flex items-center gap-3">
+          <label class="text-sm text-gray-600 w-20 shrink-0">라인 수</label>
+          <input type="range" id="nLines" min="2" max="10" value="10"
+            oninput="document.getElementById('nLinesVal').textContent=this.value; buildConstraintGrid()"
+            class="flex-1" />
+          <span id="nLinesVal" class="text-blue-600 font-bold w-6 text-center">10</span>
+        </div>
+        <div class="flex items-center gap-3">
+          <label class="text-sm text-gray-600 w-20 shrink-0">타임 슬롯</label>
+          <input type="range" id="nSlots" min="20" max="60" value="60"
+            oninput="document.getElementById('nSlotsVal').textContent=this.value"
+            class="flex-1" />
+          <span id="nSlotsVal" class="text-blue-600 font-bold w-6 text-center">60</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- 라인-모델 제약 (collapsible) -->
+    <div class="bg-white rounded-xl shadow p-4">
+      <div class="flex items-center justify-between cursor-pointer" onclick="toggleConstraints()">
+        <h2 class="font-bold text-gray-800">🔒 라인-모델 제약</h2>
+        <span id="constraintToggle" class="text-gray-400 text-lg">▼</span>
+      </div>
+      <div id="constraintContent" class="collapsible-content mt-3">
+        <div class="flex gap-2 mb-2">
+          <button onclick="setAllConstraints(true)"
+            class="text-xs bg-green-100 hover:bg-green-200 text-green-700 px-2 py-1 rounded transition">
+            전체 허용
+          </button>
+          <button onclick="restoreDefaultConstraints()"
+            class="text-xs bg-gray-100 hover:bg-gray-200 text-gray-600 px-2 py-1 rounded transition">
+            기본값 복원
+          </button>
+        </div>
+        <div id="constraintGrid" class="overflow-auto"></div>
+      </div>
+    </div>
+
+    <!-- Mold 수량 제약 -->
+    <div class="bg-white rounded-xl shadow p-4">
+      <div class="flex items-center justify-between cursor-pointer" onclick="toggleMoldQty()">
+        <h2 class="font-bold text-gray-800">🧩 Mold 보유 수량</h2>
+        <span id="moldQtyToggle" class="text-gray-400 text-lg">▼</span>
+      </div>
+      <div id="moldQtyContent" class="collapsible-content mt-3">
+        <p class="text-xs text-gray-500 mb-2">동시에 같은 Mold를 사용할 수 있는 최대 라인 수 (보유 세트 수)</p>
+        <div id="moldQtyGrid" class="grid grid-cols-5 gap-2"></div>
+        <button onclick="resetMoldQty()"
+          class="mt-2 text-xs bg-gray-100 hover:bg-gray-200 text-gray-600 px-2 py-1 rounded transition">
+          기본값 복원
+        </button>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- ── 오른쪽: 결과 패널 -->
+  <div class="flex-1 flex flex-col gap-4">
+
+    <!-- 결과 없을 때 안내 -->
+    <div id="noResultMsg" class="bg-white rounded-xl shadow p-12 text-center text-gray-400">
+      <div class="text-5xl mb-4">📊</div>
+      <p class="text-lg font-medium">시뮬레이션을 실행하면 결과가 여기에 표시됩니다</p>
+      <p class="text-sm mt-2">왼쪽 패널에서 설정 후 "시뮬레이션 실행" 버튼을 클릭하세요</p>
+    </div>
+
+    <!-- 로딩 -->
+    <div id="loadingMsg" class="hidden bg-white rounded-xl shadow p-12 text-center">
+      <div class="spinner mx-auto mb-4"></div>
+      <p class="text-gray-500">시뮬레이션 실행 중...</p>
+    </div>
+
+    <!-- 결과 컨테이너 -->
+    <div id="resultContainer" class="hidden flex-col gap-4">
+
+      <!-- ① RL vs 휴리스틱 요약 카드 -->
+      <div id="summarySection" class="bg-gradient-to-r from-green-50 to-blue-50 rounded-xl shadow p-4 border border-green-200">
+        <h2 class="font-bold text-gray-800 mb-3">🏆 핵심 비교: SQM 휴리스틱 vs RL 에이전트</h2>
+        <div id="summaryCards" class="grid grid-cols-5 gap-3"></div>
+      </div>
+
+      <!-- ② 알고리즘 랭킹 테이블 -->
+      <div class="bg-white rounded-xl shadow p-4">
+        <h2 class="font-bold text-gray-800 mb-3">📊 알고리즘 성능 종합 랭킹</h2>
+        <div id="rankingTable" class="overflow-x-auto"></div>
+      </div>
+
+      <!-- ③ 상세 지표 카드 (5개 알고리즘) -->
+      <div class="bg-white rounded-xl shadow p-4">
+        <h2 class="font-bold text-gray-800 mb-3">📈 알고리즘별 상세 지표</h2>
+        <div class="grid grid-cols-5 gap-2" id="metricsGrid"></div>
+      </div>
+
+      <!-- ④ Gantt 차트 -->
+      <div class="bg-white rounded-xl shadow p-4">
+        <h2 class="font-bold text-gray-800 mb-3">🗓 생산 계획 Gantt 차트</h2>
+        <div class="flex flex-wrap gap-3 mb-3 text-xs">
+          <div class="flex items-center gap-1"><div class="w-4 h-4 rounded" style="background:#E5E7EB"></div>빈 슬롯</div>
+          <div class="flex items-center gap-1"><div class="w-4 h-4 rounded" style="background:#3B82F6"></div>Mold 1</div>
+          <div class="flex items-center gap-1"><div class="w-4 h-4 rounded" style="background:#10B981"></div>Mold 2</div>
+          <div class="flex items-center gap-1"><div class="w-4 h-4 rounded" style="background:#F59E0B"></div>Mold 3</div>
+          <div class="flex items-center gap-1"><div class="w-4 h-4 rounded" style="background:#8B5CF6"></div>Mold 4</div>
+          <div class="flex items-center gap-1"><div class="w-4 h-4 rounded" style="background:#EF4444"></div>Mold 5</div>
+          <div class="flex items-center gap-1"><div class="w-4 h-4 rounded border-2 border-red-500" style="background:#FEE2E2"></div>납기 위반 슬롯</div>
+        </div>
+        <!-- Gantt 필터 버튼 -->
+        <div class="flex gap-2 mb-3 flex-wrap" id="ganttFilter">
+          <span class="text-xs text-gray-500 self-center">표시 알고리즘:</span>
+        </div>
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-6" id="ganttContainer"></div>
+      </div>
+
+    </div>
+  </div>
+</div>
+
+<script>
+// ── 상수 ─────────────────────────────────────────────────────────────────────
+const API_BASE = 'https://sqm-hybrid-api.onrender.com';
+
+const MOLD_COLORS = {
+  0: '#E5E7EB', 1: '#3B82F6', 2: '#10B981',
+  3: '#F59E0B', 4: '#8B5CF6', 5: '#EF4444',
+};
+
+const ALGO_META = {
+  edd:       { label: 'EDD',          short: 'EDD',  color: 'orange', bg: 'bg-orange-50',  border: 'border-orange-200', text: 'text-orange-700' },
+  spt:       { label: 'SPT',          short: 'SPT',  color: 'yellow', bg: 'bg-yellow-50',  border: 'border-yellow-200', text: 'text-yellow-700' },
+  greedy:    { label: 'AS-IS 그리디',  short: 'Greedy', color: 'red',  bg: 'bg-red-50',    border: 'border-red-200',    text: 'text-red-700'    },
+  heuristic: { label: 'SQM 휴리스틱',  short: 'Heur', color: 'blue',  bg: 'bg-blue-50',   border: 'border-blue-200',   text: 'text-blue-700'   },
+  rl_agent:  { label: 'RL 에이전트',   short: 'RL',   color: 'green', bg: 'bg-green-50',  border: 'border-green-200',  text: 'text-green-700'  },
+};
+
+const METRIC_DEFS = [
+  { key: 'due_violations', label: '납기 위반',   unit: '건', lowerBetter: true  },
+  { key: 'mold_changes',   label: 'Mold 변경',  unit: '회', lowerBetter: true  },
+  { key: 'color_changes',  label: 'Color 변경', unit: '회', lowerBetter: true  },
+  { key: 'ct_std',         label: 'CT 표준편차', unit: '',   lowerBetter: true  },
+  { key: 'balance_std',    label: '밸런스 Std',  unit: '',   lowerBetter: true  },
+];
+
+const DEFAULT_ORDERS = [
+  {model:6,qty:200,due:2,mold_id:3,color_id:1},{model:3,qty:300,due:2,mold_id:2,color_id:1},
+  {model:2,qty:300,due:3,mold_id:1,color_id:1},{model:2,qty:300,due:3,mold_id:1,color_id:2},
+  {model:1,qty:250,due:4,mold_id:1,color_id:1},{model:3,qty:200,due:4,mold_id:2,color_id:2},
+  {model:4,qty:300,due:2,mold_id:2,color_id:1},{model:4,qty:250,due:3,mold_id:2,color_id:2},
+  {model:7,qty:250,due:5,mold_id:4,color_id:1},{model:8,qty:250,due:5,mold_id:4,color_id:1},
+  {model:3,qty:150,due:5,mold_id:2,color_id:3},{model:4,qty:250,due:6,mold_id:2,color_id:3},
+  {model:8,qty:250,due:6,mold_id:4,color_id:2},{model:5,qty:100,due:6,mold_id:3,color_id:1},
+  {model:4,qty:200,due:7,mold_id:2,color_id:4},{model:2,qty:300,due:7,mold_id:1,color_id:3},
+  {model:6,qty:250,due:7,mold_id:3,color_id:2},{model:4,qty:100,due:7,mold_id:2,color_id:5},
+  {model:7,qty:100,due:8,mold_id:4,color_id:2},{model:3,qty:100,due:9,mold_id:2,color_id:4},
+  {model:6,qty:150,due:10,mold_id:3,color_id:3},{model:2,qty:200,due:8,mold_id:1,color_id:4},
+  {model:5,qty:150,due:11,mold_id:3,color_id:2},{model:2,qty:200,due:13,mold_id:1,color_id:5},
+  {model:8,qty:150,due:12,mold_id:4,color_id:3},{model:8,qty:250,due:11,mold_id:4,color_id:4},
+  {model:4,qty:200,due:12,mold_id:2,color_id:6},{model:1,qty:150,due:12,mold_id:1,color_id:2},
+  {model:7,qty:100,due:13,mold_id:4,color_id:3},{model:7,qty:300,due:14,mold_id:4,color_id:5},
+  {model:6,qty:150,due:14,mold_id:3,color_id:4},{model:6,qty:250,due:15,mold_id:3,color_id:5},
+  {model:3,qty:200,due:13,mold_id:2,color_id:5},{model:8,qty:300,due:16,mold_id:4,color_id:5},
+  {model:7,qty:200,due:16,mold_id:4,color_id:6},{model:3,qty:200,due:17,mold_id:2,color_id:6},
+  {model:3,qty:100,due:17,mold_id:2,color_id:7},{model:7,qty:300,due:18,mold_id:4,color_id:7},
+  {model:3,qty:250,due:19,mold_id:2,color_id:8},{model:8,qty:200,due:18,mold_id:4,color_id:6},
+  {model:3,qty:100,due:20,mold_id:2,color_id:8},{model:1,qty:250,due:21,mold_id:1,color_id:3},
+  {model:3,qty:100,due:23,mold_id:2,color_id:7},{model:2,qty:250,due:22,mold_id:1,color_id:6},
+  {model:4,qty:100,due:23,mold_id:2,color_id:6},{model:4,qty:250,due:24,mold_id:2,color_id:7},
+  {model:6,qty:200,due:23,mold_id:3,color_id:6},{model:3,qty:150,due:24,mold_id:2,color_id:8},
+  {model:2,qty:100,due:22,mold_id:1,color_id:7},
+];
+
+const DEFAULT_LINE_VALID_MODELS = {
+  0:[1,3,4,5,6,7,8,9,10], 1:[1,2,5,6,8,9,10],
+  2:[1,2,3,4,5,6,7,8],    3:[1,2,3,4,6,7,9,10],
+  4:[1,2,3,4,5,7,8,10],   5:[1,2,3,4,5,6,8,9,10],
+  6:[2,3,4,5,6,7,8,9],    7:[1,2,3,4,5,6,7,8,9,10],
+  8:[1,2,3,4,5,6,7,8,9,10], 9:[1,2,3,4,5,6,7,8,9,10],
+};
+
+const DEFAULT_MOLD_QUANTITIES = { 1:2, 2:3, 3:2, 4:3, 5:1 };
+
+let orders = [];
+let constraints = {};
+let moldQty = { ...DEFAULT_MOLD_QUANTITIES };
+let lastData = null;
+let visibleAlgos = new Set(['edd','spt','greedy','heuristic','rl_agent']);
+
+// ── 초기화 ────────────────────────────────────────────────────────────────────
+function init() {
+  orders = DEFAULT_ORDERS.map((o, i) => ({ ...o, _id: i }));
+  renderOrderTable();
+  restoreDefaultConstraints();
+  buildConstraintGrid();
+  buildMoldQtyGrid();
+}
+
+// ── 오더 테이블 ───────────────────────────────────────────────────────────────
+function renderOrderTable() {
+  const tbody = document.getElementById('orderBody');
+  const emptyMsg = document.getElementById('emptyOrderMsg');
+  if (orders.length === 0) {
+    tbody.innerHTML = '';
+    emptyMsg.classList.remove('hidden');
+    return;
+  }
+  emptyMsg.classList.add('hidden');
+  tbody.innerHTML = orders.map((o, idx) => `
+    <tr class="hover:bg-gray-50">
+      <td class="p-1 border text-center text-gray-400">${idx+1}</td>
+      <td class="p-1 border">
+        <select class="w-full text-xs border-0 bg-transparent focus:outline-none"
+          onchange="updateOrder(${idx},'model',+this.value)">
+          ${Array.from({length:10},(_,i)=>`<option value="${i+1}"${o.model===i+1?' selected':''}>M${i+1}</option>`).join('')}
+        </select>
+      </td>
+      <td class="p-1 border">
+        <input type="number" value="${o.qty}" min="50" step="50"
+          class="w-16 text-xs text-center border-0 bg-transparent focus:outline-none"
+          onchange="updateOrder(${idx},'qty',+this.value)" />
+      </td>
+      <td class="p-1 border">
+        <input type="number" value="${o.due}" min="1"
+          class="w-12 text-xs text-center border-0 bg-transparent focus:outline-none"
+          onchange="updateOrder(${idx},'due',+this.value)" />
+      </td>
+      <td class="p-1 border">
+        <select class="w-full text-xs border-0 bg-transparent focus:outline-none"
+          onchange="updateOrder(${idx},'mold_id',+this.value)">
+          ${Array.from({length:5},(_,i)=>`<option value="${i+1}"${o.mold_id===i+1?' selected':''}>M${i+1}</option>`).join('')}
+        </select>
+      </td>
+      <td class="p-1 border">
+        <select class="w-full text-xs border-0 bg-transparent focus:outline-none"
+          onchange="updateOrder(${idx},'color_id',+this.value)">
+          ${Array.from({length:8},(_,i)=>`<option value="${i+1}"${o.color_id===i+1?' selected':''}>C${i+1}</option>`).join('')}
+        </select>
+      </td>
+      <td class="p-1 border text-center">
+        <button onclick="deleteOrder(${idx})" class="text-red-400 hover:text-red-600 font-bold">✕</button>
+      </td>
+    </tr>`).join('');
+}
+
+function updateOrder(idx, field, val) { orders[idx][field] = val; }
+function addOrderRow() {
+  orders.push({ model:1, qty:100, due:5, mold_id:1, color_id:1, _id: Date.now() });
+  renderOrderTable();
+}
+function deleteOrder(idx) { orders.splice(idx,1); renderOrderTable(); }
+
+// ── 제약 그리드 ───────────────────────────────────────────────────────────────
+function restoreDefaultConstraints() {
+  constraints = {};
+  for (let l = 0; l < 10; l++) {
+    constraints[l] = {};
+    for (let m = 1; m <= 10; m++) {
+      constraints[l][m] = DEFAULT_LINE_VALID_MODELS[l]?.includes(m) ?? false;
+    }
+  }
+  buildConstraintGrid();
+}
+
+function setAllConstraints(val) {
+  for (let l = 0; l < 10; l++)
+    for (let m = 1; m <= 10; m++)
+      constraints[l][m] = val;
+  buildConstraintGrid();
+}
+
+function buildConstraintGrid() {
+  const nLines = parseInt(document.getElementById('nLines').value);
+  const el = document.getElementById('constraintGrid');
+  if (!el) return;
+  let html = '<table class="text-xs border-collapse w-full">';
+  html += '<tr><th class="p-1 bg-gray-50 border text-gray-500">라인＼모델</th>';
+  for (let m = 1; m <= 10; m++)
+    html += `<th class="p-1 bg-gray-50 border text-gray-600 w-7">M${m}</th>`;
+  html += '</tr>';
+  for (let l = 0; l < nLines; l++) {
+    html += `<tr><td class="p-1 border font-semibold text-blue-600 bg-blue-50">L${l}</td>`;
+    for (let m = 1; m <= 10; m++) {
+      const checked = constraints[l]?.[m] ? 'checked' : '';
+      html += `<td class="p-1 border text-center">
+        <input type="checkbox" ${checked} onchange="constraints[${l}][${m}]=this.checked" /></td>`;
+    }
+    html += '</tr>';
+  }
+  html += '</table>';
+  el.innerHTML = html;
+}
+
+function toggleConstraints() {
+  const c = document.getElementById('constraintContent');
+  const t = document.getElementById('constraintToggle');
+  c.classList.toggle('open');
+  t.textContent = c.classList.contains('open') ? '▲' : '▼';
+}
+
+function toggleMoldQty() {
+  const c = document.getElementById('moldQtyContent');
+  const t = document.getElementById('moldQtyToggle');
+  c.classList.toggle('open');
+  t.textContent = c.classList.contains('open') ? '▲' : '▼';
+}
+
+function buildMoldQtyGrid() {
+  const grid = document.getElementById('moldQtyGrid');
+  grid.innerHTML = [1,2,3,4,5].map(mid => `
+    <div class="flex flex-col items-center bg-gray-50 rounded-lg p-2 border">
+      <div class="text-xs font-bold text-gray-600 mb-1">Mold ${mid}</div>
+      <input type="number" min="1" max="10" value="${moldQty[mid]}"
+        class="w-14 text-center text-sm border rounded px-1 py-0.5"
+        onchange="moldQty[${mid}]=Math.max(1,+this.value||1);this.value=moldQty[${mid}]">
+      <div class="text-xs text-gray-400 mt-0.5">세트</div>
+    </div>
+  `).join('');
+}
+
+function resetMoldQty() {
+  moldQty = { ...DEFAULT_MOLD_QUANTITIES };
+  buildMoldQtyGrid();
+}
+
+// ── 시뮬레이션 실행 ───────────────────────────────────────────────────────────
+async function runSimulation() {
+  if (orders.length === 0) { alert('오더를 추가하세요.'); return; }
+  const nLines = parseInt(document.getElementById('nLines').value);
+  const nSlots = parseInt(document.getElementById('nSlots').value);
+  const lvm = {};
+  for (let l = 0; l < nLines; l++) {
+    lvm[l] = [];
+    for (let m = 1; m <= 10; m++)
+      if (constraints[l]?.[m]) lvm[l].push(m);
+  }
+  setLoading(true);
+  try {
+    const resp = await fetch(`${API_BASE}/api/simulate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        orders: orders.map(o => ({
+          model:o.model, qty:o.qty, due:o.due, mold_id:o.mold_id, color_id:o.color_id
+        })),
+        n_lines: nLines, n_slots: nSlots,
+        line_valid_models: Object.fromEntries(Object.entries(lvm).map(([k,v])=>[String(k),v])),
+        mold_quantities: Object.fromEntries(Object.entries(moldQty).map(([k,v])=>[String(k),v])),
+      }),
+    });
+    if (!resp.ok) throw new Error(`서버 오류 ${resp.status}: ${await resp.text()}`);
+    lastData = await resp.json();
+    renderResults(lastData, nLines, nSlots);
+  } catch(e) {
+    alert('시뮬레이션 오류: ' + e.message);
+  } finally {
+    setLoading(false);
+  }
+}
+
+function setLoading(on) {
+  document.getElementById('runBtn').disabled = on;
+  document.getElementById('runBtnIcon').textContent = on ? '' : '▶';
+  document.getElementById('runBtnText').textContent = on ? '실행 중...' : '시뮬레이션 실행';
+  document.getElementById('noResultMsg').classList.add('hidden');
+  document.getElementById('loadingMsg').classList.toggle('hidden', !on);
+  document.getElementById('resultContainer').classList.toggle('hidden', on);
+  if (on) document.getElementById('resultContainer').classList.remove('flex');
+  else document.getElementById('resultContainer').classList.add('flex');
+}
+
+// ── 결과 렌더링 ───────────────────────────────────────────────────────────────
+function renderResults(data, nLines, nSlots) {
+  const algos = ['edd','spt','greedy','heuristic','rl_agent'];
+  const metrics = {};
+  algos.forEach(a => { metrics[a] = data[a]?.metrics || {}; });
+
+  renderSummary(metrics);
+  renderRanking(metrics, algos);
+  renderMetrics(metrics, algos);
+  renderGanttSection(data, nLines, nSlots);
+}
+
+// ① RL vs 휴리스틱 요약 카드
+function renderSummary(metrics) {
+  const hm = metrics.heuristic;
+  const rm = metrics.rl_agent;
+  const container = document.getElementById('summaryCards');
+
+  container.innerHTML = METRIC_DEFS.map(def => {
+    const hval = hm[def.key] ?? 0;
+    const rval = rm[def.key] ?? 0;
+    const pct  = hval !== 0 ? ((hval - rval) / hval * 100) : 0;
+    const better = pct > 0;
+    const sign   = pct >= 0 ? '+' : '';
+
+    return `
+      <div class="bg-white rounded-xl p-3 border ${better ? 'border-green-300' : 'border-red-200'} text-center">
+        <div class="text-xs text-gray-500 mb-1">${def.label}</div>
+        <div class="flex justify-center items-end gap-2 mb-1">
+          <div class="text-center">
+            <div class="text-xs text-blue-400">휴리스틱</div>
+            <div class="text-lg font-bold text-blue-600">${hval}${def.unit}</div>
+          </div>
+          <div class="text-gray-400 text-lg mb-1">→</div>
+          <div class="text-center">
+            <div class="text-xs text-green-400">RL 에이전트</div>
+            <div class="text-lg font-bold text-green-600">${rval}${def.unit}</div>
+          </div>
+        </div>
+        <div class="text-sm font-bold ${better ? 'text-green-600' : 'text-red-500'}">
+          ${sign}${pct.toFixed(1)}% ${better ? '▲ 개선' : '▼ 열세'}
+        </div>
+        <div class="improvement-bar mt-2 ${better ? 'bg-green-200' : 'bg-red-200'} w-full">
+          <div class="improvement-bar ${better ? 'bg-green-500' : 'bg-red-400'}"
+            style="width:${Math.min(100,Math.abs(pct))}%"></div>
+        </div>
+      </div>`;
+  }).join('');
+}
+
+// ② 종합 랭킹 테이블
+function renderRanking(metrics, algos) {
+  const container = document.getElementById('rankingTable');
+
+  // 각 알고리즘의 종합 점수 계산 (낮을수록 좋은 지표 정규화 평균)
+  const scores = {};
+  algos.forEach(a => {
+    let total = 0;
+    METRIC_DEFS.forEach(def => {
+      const vals = algos.map(x => metrics[x][def.key] ?? 0);
+      const maxV = Math.max(...vals, 1);
+      const v = metrics[a][def.key] ?? 0;
+      total += def.lowerBetter ? (v / maxV) : (1 - v / maxV);
+    });
+    scores[a] = total / METRIC_DEFS.length;
+  });
+
+  const ranked = [...algos].sort((a, b) => scores[a] - scores[b]);
+  const rankBadges = ['🥇','🥈','🥉','4위','5위'];
+
+  // 각 지표별 최솟값 (최우수)
+  const bestVals = {};
+  METRIC_DEFS.forEach(def => {
+    bestVals[def.key] = Math.min(...algos.map(a => metrics[a][def.key] ?? Infinity));
+  });
+
+  let html = `
+    <table class="w-full text-xs border-collapse">
+      <thead>
+        <tr class="bg-gray-50">
+          <th class="p-2 border text-left">순위</th>
+          <th class="p-2 border text-left">알고리즘</th>
+          ${METRIC_DEFS.map(d=>`<th class="p-2 border text-center">${d.label}</th>`).join('')}
+          <th class="p-2 border text-center">종합점수</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${ranked.map((a, i) => {
+          const m = metrics[a];
+          const meta = ALGO_META[a];
+          const isRL = a === 'rl_agent';
+          const isHeur = a === 'heuristic';
+          const rowBg = isRL ? 'bg-green-50' : isHeur ? 'bg-blue-50' : '';
+          return `
+            <tr class="${rowBg} hover:opacity-80">
+              <td class="p-2 border text-center font-bold text-lg">${rankBadges[i]}</td>
+              <td class="p-2 border font-semibold ${meta.text}">
+                ${isRL ? '★ ' : ''}${meta.label}
+              </td>
+              ${METRIC_DEFS.map(def => {
+                const val = m[def.key] ?? '-';
+                const isBest = val !== '-' && val === bestVals[def.key];
+                return `<td class="p-2 border text-center ${isBest ? 'best-value font-bold' : ''}">
+                  ${val}${isBest ? ' ✓' : ''}
+                </td>`;
+              }).join('')}
+              <td class="p-2 border text-center font-bold ${isRL ? 'text-green-600' : ''}">
+                ${(scores[a]*100).toFixed(1)}
+              </td>
+            </tr>`;
+        }).join('')}
+      </tbody>
+    </table>
+    <p class="text-xs text-gray-400 mt-1">※ 종합점수: 낮을수록 우수 | ✓ 해당 지표 최우수 | ★ RL 에이전트</p>`;
+  container.innerHTML = html;
+}
+
+// ③ 상세 지표 카드
+function renderMetrics(metrics, algos) {
+  const grid = document.getElementById('metricsGrid');
+  const bestVals = {};
+  METRIC_DEFS.forEach(def => {
+    bestVals[def.key] = Math.min(...algos.map(a => metrics[a][def.key] ?? Infinity));
+  });
+
+  // RL vs 각 알고리즘 기준 (휴리스틱을 메인 기준)
+  const refs = {
+    edd: null, spt: metrics.edd, greedy: metrics.edd,
+    heuristic: metrics.edd, rl_agent: metrics.heuristic,
+  };
+
+  grid.innerHTML = algos.map(a => {
+    const m = metrics[a];
+    const meta = ALGO_META[a];
+    const ref = refs[a];
+
+    const rows = METRIC_DEFS.map(def => {
+      const val = m[def.key] ?? '-';
+      const isBest = val !== '-' && val === bestVals[def.key];
+      let badgeHtml = '';
+      if (ref && val !== '-') {
+        const refVal = ref[def.key] ?? 0;
+        if (refVal !== 0) {
+          const pct = ((refVal - val) / refVal * 100).toFixed(1);
+          const better = def.lowerBetter ? (val <= refVal) : (val >= refVal);
+          const color = better ? 'text-green-600 bg-green-100' : 'text-red-600 bg-red-100';
+          badgeHtml = `<span class="ml-1 text-xs px-1 rounded ${color}">${pct>=0?'+':''}${pct}%</span>`;
+        }
+      }
+      return `
+        <div class="flex justify-between items-center py-1 border-b border-gray-100 last:border-0">
+          <span class="text-gray-500 text-xs">${def.label}</span>
+          <span class="font-bold ${meta.text} text-sm ${isBest ? 'underline' : ''}">
+            ${val}${def.unit}${badgeHtml}
+          </span>
+        </div>`;
+    }).join('');
+
+    const refLabel = a === 'rl_agent' ? 'vs 휴리스틱' : a === 'edd' ? '기준' : 'vs EDD';
+
+    return `
+      <div class="metric-card ${meta.bg} border ${meta.border} rounded-xl p-3">
+        <div class="font-bold ${meta.text} mb-1 text-sm">${meta.label}</div>
+        <div class="text-xs text-gray-400 mb-2">${refLabel}</div>
+        ${rows}
+      </div>`;
+  }).join('');
+}
+
+// ④ Gantt 필터 + 차트
+function renderGanttSection(data, nLines, nSlots) {
+  const algos = ['edd','spt','greedy','heuristic','rl_agent'];
+
+  // 필터 버튼
+  const filterEl = document.getElementById('ganttFilter');
+  filterEl.innerHTML = '<span class="text-xs text-gray-500 self-center">표시:</span>' +
+    algos.map(a => {
+      const meta = ALGO_META[a];
+      const active = visibleAlgos.has(a);
+      return `<button id="filter-${a}" onclick="toggleGantt('${a}')"
+        class="text-xs px-3 py-1 rounded-full border font-medium transition
+          ${active ? `${meta.bg} ${meta.border} ${meta.text}` : 'bg-white border-gray-300 text-gray-400'}">
+        ${meta.short}
+      </button>`;
+    }).join('');
+
+  renderGantts(data, nLines, nSlots);
+}
+
+function toggleGantt(a) {
+  if (visibleAlgos.has(a)) visibleAlgos.delete(a);
+  else visibleAlgos.add(a);
+  if (lastData) renderGanttSection(lastData,
+    parseInt(document.getElementById('nLines').value),
+    parseInt(document.getElementById('nSlots').value));
+}
+
+function renderGantts(data, nLines, nSlots) {
+  const container = document.getElementById('ganttContainer');
+  container.innerHTML = '';
+
+  const algos = ['edd','spt','greedy','heuristic','rl_agent'];
+  algos.forEach(a => {
+    if (!visibleAlgos.has(a)) return;
+    const meta = ALGO_META[a];
+    const sched = data[a]?.schedule;
+    const isRL   = a === 'rl_agent';
+    const isHeur = a === 'heuristic';
+
+    const div = document.createElement('div');
+    div.innerHTML = `
+      <div class="font-semibold ${meta.text} mb-1 flex items-center gap-2">
+        ${isRL ? '★' : isHeur ? '●' : '○'}
+        ${meta.label}
+        ${isRL ? '<span class="text-xs bg-green-100 text-green-600 px-2 py-0.5 rounded-full">Dueling DQN + 정렬+연속성보너스</span>' : ''}
+        ${isHeur ? '<span class="text-xs bg-blue-100 text-blue-600 px-2 py-0.5 rounded-full">Mold→Color→Due 평준화</span>' : ''}
+      </div>`;
+    div.appendChild(buildGantt(sched, nLines, nSlots));
+    container.appendChild(div);
+  });
+}
+
+function buildGantt(schedule, nLines, nSlots) {
+  const displaySlots = Math.min(nSlots, 30);
+  const wrap = document.createElement('div');
+  wrap.className = 'gantt-scroll border border-gray-200 rounded-lg';
+
+  // 헤더 행
+  const headerRow = document.createElement('div');
+  headerRow.className = 'gantt-row bg-gray-50';
+  const lblH = document.createElement('div');
+  lblH.className = 'gantt-label text-gray-400 text-xs';
+  headerRow.appendChild(lblH);
+  for (let c = 0; c < displaySlots; c++) {
+    const h = document.createElement('div');
+    h.className = 'gantt-cell bg-gray-50 text-gray-400';
+    h.style.fontSize = '9px';
+    h.textContent = c + 1;
+    headerRow.appendChild(h);
+  }
+  wrap.appendChild(headerRow);
+
+  for (let r = 0; r < nLines; r++) {
+    const row = document.createElement('div');
+    row.className = 'gantt-row';
+    const lbl = document.createElement('div');
+    lbl.className = 'gantt-label';
+    lbl.textContent = `L${r}`;
+    row.appendChild(lbl);
+
+    for (let c = 0; c < displaySlots; c++) {
+      const cell = schedule?.[r]?.[c] ?? null;
+      const div = document.createElement('div');
+      div.className = 'gantt-cell';
+
+      if (cell) {
+        const [model, qty, due, mold_id, color_id] = cell;
+        const isViolation = c >= due;
+        div.style.background = isViolation ? '#FEE2E2' : (MOLD_COLORS[mold_id] || '#E5E7EB');
+        div.style.color = isViolation ? '#ef4444' : (mold_id >= 1 ? '#fff' : '#9ca3af');
+        if (isViolation) div.classList.add('due-violation');
+        div.textContent = `M${model}`;
+
+        const tip = document.createElement('div');
+        tip.className = 'tooltip';
+        tip.innerHTML = `<b>M${model}</b> | Qty:${qty} | Due:W${due}<br/>
+          Mold:${mold_id} | Color:${color_id}${isViolation ? '<br/><b style="color:#f87171">⚠ 납기 위반</b>' : ''}`;
+        div.appendChild(tip);
+      } else {
+        div.style.background = '#F9FAFB';
+      }
+      row.appendChild(div);
+    }
+    wrap.appendChild(row);
+  }
+
+  if (nSlots > 30) {
+    const note = document.createElement('div');
+    note.className = 'text-xs text-gray-400 mt-1 px-2 pb-1';
+    note.textContent = `※ 처음 30슬롯 표시 (전체 ${nSlots}슬롯)`;
+    wrap.appendChild(note);
+  }
+  return wrap;
+}
+
+init();
+</script>
+</body>
+</html>
