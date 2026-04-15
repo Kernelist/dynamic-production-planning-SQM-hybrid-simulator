@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+env/
+
+# PyTorch 모델 (용량 크므로 제외)
+backend/engines/saved_models/
+*.pt
+*.pth
+
+# 로그
+*.log
+server.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OMC internal state
+.omc/
+
+# 환경 변수
+.env
